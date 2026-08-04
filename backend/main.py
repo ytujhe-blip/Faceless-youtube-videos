@@ -9,7 +9,7 @@ import os
 import uuid
 import json
 
-from config import settings
+from config import settings, load_user_settings, save_user_settings, get_effective_settings
 from script_generator import ScriptGenerator
 from pexels_service import PexelsService
 from voiceover_service import VoiceoverService
@@ -43,6 +43,26 @@ class GenerateRequest(BaseModel):
     add_text_overlays: bool = True
     add_transitions: bool = True
     add_background_music: bool = False
+
+
+class SettingsRequest(BaseModel):
+    llm_api_key: Optional[str] = None
+    llm_base_url: Optional[str] = None
+    llm_model: Optional[str] = None
+    pexels_api_key: Optional[str] = None
+    voice_provider: Optional[str] = None
+    openai_tts_voice: Optional[str] = None
+    video_quality: Optional[str] = None
+    default_duration: Optional[int] = None
+    add_text_overlays: Optional[bool] = None
+    add_transitions: Optional[bool] = None
+    add_background_music: Optional[bool] = None
+
+
+class LLMModel(BaseModel):
+    id: str
+    name: str
+    object: str = "model"
 
 
 class JobStatus(BaseModel):
@@ -307,3 +327,195 @@ async def root():
 async def health_check():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+@app.get("/api/settings")
+async def get_settings():
+    """Get current user settings."""
+    user_settings = load_user_settings()
+    effective_settings = get_effective_settings()
+    
+    # Don't return API keys in full for security (show masked version)
+    safe_settings = user_settings.copy()
+    if safe_settings.get("llm_api_key"):
+        key = safe_settings["llm_api_key"]
+        safe_settings["llm_api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
+        del safe_settings["llm_api_key"]
+    
+    if safe_settings.get("pexels_api_key"):
+        key = safe_settings["pexels_api_key"]
+        safe_settings["pexels_api_key_masked"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
+        del safe_settings["pexels_api_key"]
+    
+    return {
+        "settings": safe_settings,
+        "effective": effective_settings,
+        "configured": bool(effective_settings.get("llm_api_key") and effective_settings.get("pexels_api_key"))
+    }
+
+
+@app.post("/api/settings")
+async def update_settings(request: SettingsRequest):
+    """Update user settings."""
+    current_settings = load_user_settings()
+    
+    # Update only provided fields
+    update_data = request.dict(exclude_none=True)
+    current_settings.update(update_data)
+    
+    success = save_user_settings(current_settings)
+    
+    if success:
+        return {
+            "message": "Settings updated successfully",
+            "settings": current_settings
+        }
+    else:
+        raise HTTPException(status_code=500, detail="Failed to save settings")
+
+
+@app.get("/api/llm/models")
+async def list_llm_models():
+    """Fetch available LLM models from the configured API endpoint."""
+    user_settings = load_user_settings()
+    api_key = user_settings.get("llm_api_key") or os.getenv("LLM_API_KEY")
+    base_url = user_settings.get("llm_base_url") or os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+    
+    if not api_key:
+        raise HTTPException(status_code=400, detail="LLM API key not configured")
+    
+    try:
+        import httpx
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{base_url}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=30.0
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                models = data.get("data", [])
+                
+                # Filter and format models
+                formatted_models = []
+                for model in models:
+                    model_id = model.get("id", "")
+                    # Skip embedding and fine-tuned models
+                    if "embedding" in model_id.lower() or "ft:" in model_id:
+                        continue
+                    
+                    formatted_models.append({
+                        "id": model_id,
+                        "name": model_id.replace("-", " ").title(),
+                        "object": model.get("object", "model")
+                    })
+                
+                return {"models": formatted_models}
+            else:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Failed to fetch models: {response.text}"
+                )
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not connect to LLM API: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching models: {str(e)}"
+        )
+
+
+@app.post("/api/settings/test-llm")
+async def test_llm_connection():
+    """Test LLM API connection with a simple request."""
+    user_settings = load_user_settings()
+    api_key = user_settings.get("llm_api_key") or os.getenv("LLM_API_KEY")
+    base_url = user_settings.get("llm_base_url") or os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+    model = user_settings.get("llm_model") or os.getenv("LLM_MODEL", "gpt-3.5-turbo")
+    
+    if not api_key:
+        return {"success": False, "message": "LLM API key not configured"}
+    
+    try:
+        import httpx
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "user", "content": "Reply with just 'OK' if you can read this."}
+                    ],
+                    "max_tokens": 10
+                },
+                timeout=30.0
+            )
+            
+            if response.status_code == 200:
+                return {"success": True, "message": "LLM connection successful!"}
+            else:
+                return {
+                    "success": False,
+                    "message": f"LLM API error: {response.status_code} - {response.text}"
+                }
+    except httpx.RequestError as e:
+        return {"success": False, "message": f"Connection error: {str(e)}"}
+    except Exception as e:
+        return {"success": False, "message": f"Error: {str(e)}"}
+
+
+@app.post("/api/settings/test-pexels")
+async def test_pexels_connection():
+    """Test Pexels API connection with a simple search."""
+    user_settings = load_user_settings()
+    api_key = user_settings.get("pexels_api_key") or os.getenv("PEXELS_API_KEY")
+    
+    if not api_key:
+        return {"success": False, "message": "Pexels API key not configured"}
+    
+    try:
+        import httpx
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://api.pexels.com/videos/search?query=nature&per_page=1",
+                headers={"Authorization": api_key},
+                timeout=30.0
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "success": True,
+                    "message": "Pexels connection successful!",
+                    "total_results": data.get("total_results", 0)
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": f"Pexels API error: {response.status_code} - {response.text}"
+                }
+    except httpx.RequestError as e:
+        return {"success": False, "message": f"Connection error: {str(e)}"}
+    except Exception as e:
+        return {"success": False, "message": f"Error: {str(e)}"}
+
+
+@app.get("/")
+async def root():
+    """Root endpoint."""
+    return {
+        "message": "Faceless Video Generator API",
+        "version": "1.0.0",
+        "docs": "/docs"
+    }

@@ -1,16 +1,33 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom'
+import Settings from './pages/Settings'
 import axios from 'axios'
 
 const API_BASE_URL = '/api'
 
-function App() {
+function HomePage() {
   const [topic, setTopic] = useState('')
   const [duration, setDuration] = useState(60)
   const [jobId, setJobId] = useState(null)
   const [status, setStatus] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
-
+  const [configured, setConfigured] = useState(null)
+  
+  // Check configuration on mount
+  useEffect(() => {
+    checkConfiguration()
+  }, [])
+  
+  const checkConfiguration = async () => {
+    try {
+      const response = await axios.get(`${API_BASE_URL}/settings`)
+      setConfigured(response.data.configured)
+    } catch (error) {
+      console.error('Failed to check configuration:', error)
+    }
+  }
+  
   const handleSubmit = async (e) => {
     e.preventDefault()
     
@@ -95,6 +112,32 @@ function App() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900">
       <div className="container mx-auto px-4 py-8">
+        {/* Navigation */}
+        <nav className="flex justify-between items-center mb-8">
+          <h1 className="text-3xl font-bold text-white">🎬 Video Generator</h1>
+          <Link 
+            to="/settings" 
+            className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition-all flex items-center"
+          >
+            <span className="mr-2">⚙️</span>
+            Settings
+          </Link>
+        </nav>
+
+        {/* Configuration Warning */}
+        {configured === false && (
+          <div className="bg-yellow-500/20 backdrop-blur-lg border border-yellow-500/50 rounded-lg p-4 mb-6">
+            <p className="text-yellow-200 flex items-center justify-between">
+              <span>
+                <span className="font-semibold">⚠️ Setup Required:</span> Please configure your API keys in the settings page.
+              </span>
+              <Link to="/settings" className="underline hover:text-yellow-100">
+                Go to Settings →
+              </Link>
+            </p>
+          </div>
+        )}
+
         {/* Header */}
         <header className="text-center mb-12">
           <h1 className="text-5xl font-bold text-white mb-4">
@@ -284,6 +327,17 @@ function App() {
         </footer>
       </div>
     </div>
+  )
+}
+
+function App() {
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<HomePage />} />
+        <Route path="/settings" element={<Settings />} />
+      </Routes>
+    </Router>
   )
 }
 
