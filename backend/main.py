@@ -39,7 +39,10 @@ app.mount("/videos", StaticFiles(directory="output_videos"), name="videos")
 class GenerateRequest(BaseModel):
     topic: str
     duration_seconds: int = 60
-    video_quality: str = "720p"
+    video_quality: str = "720p"  # 480p, 720p, 1080p
+    add_text_overlays: bool = True
+    add_transitions: bool = True
+    add_background_music: bool = False
 
 
 class JobStatus(BaseModel):
@@ -119,7 +122,7 @@ async def process_video_generation(job_id: str, request: GenerateRequest):
         jobs[job_id]["progress"] = 60
         jobs[job_id]["message"] = "Voiceovers generated"
         
-        # Step 4: Create scene videos
+        # Step 4: Create scene videos with text overlays and quality settings
         print(f"[{job_id}] Creating scene videos...")
         jobs[job_id]["message"] = "Assembling scene clips..."
         
@@ -128,7 +131,12 @@ async def process_video_generation(job_id: str, request: GenerateRequest):
         
         for i, scene in enumerate(scenes_with_audio):
             if scene.get("video_path") and scene.get("audio_path"):
-                updated_scene = await video_editor.create_scene_video(scene, i + 1)
+                updated_scene = await video_editor.create_scene_video(
+                    scene, 
+                    i + 1,
+                    quality=request.video_quality,
+                    add_text=request.add_text_overlays
+                )
                 if updated_scene.get("scene_video_path"):
                     scene_video_paths.append(updated_scene["scene_video_path"])
             
@@ -136,14 +144,18 @@ async def process_video_generation(job_id: str, request: GenerateRequest):
         
         jobs[job_id]["message"] = f"Created {len(scene_video_paths)} scene clips"
         
-        # Step 5: Concatenate all scenes
+        # Step 5: Concatenate all scenes with transitions
         print(f"[{job_id}] Concatenating videos...")
         jobs[job_id]["message"] = "Combining all scenes..."
         
         output_filename = f"{job_id}.mp4"
         output_path = os.path.join("output_videos", output_filename)
         
-        success = await video_editor.concatenate_videos(scene_video_paths, output_path)
+        success = await video_editor.concatenate_videos(
+            scene_video_paths, 
+            output_path,
+            add_transitions=request.add_transitions
+        )
         
         if not success:
             raise Exception("Failed to concatenate videos")
@@ -180,7 +192,8 @@ async def generate_video(request: GenerateRequest, background_tasks: BackgroundT
         "status": "pending",
         "progress": 0,
         "message": "Initializing...",
-        "request": request.dict()
+        "request": request.dict(),
+        "created_at": asyncio.get_event_loop().time()
     }
     
     # Start background task
@@ -242,10 +255,41 @@ async def list_jobs():
                 "job_id": job_id,
                 "status": data.get("status"),
                 "progress": data.get("progress"),
-                "topic": data.get("request", {}).get("topic")
+                "topic": data.get("request", {}).get("topic"),
+                "created_at": data.get("created_at"),
+                "video_quality": data.get("request", {}).get("video_quality")
             }
-            for job_id, data in jobs.items()
+            for job_id, data in sorted(jobs.items(), key=lambda x: x[1].get("created_at", ""), reverse=True)
         ]
+    }
+
+
+@app.get("/api/job/{job_id}/details")
+async def get_job_details(job_id: str):
+    """Get detailed information about a specific job including script and metadata."""
+    
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_data = jobs[job_id]
+    
+    # Load script if available
+    script_path = os.path.join("jobs", f"{job_id}_script.json")
+    script = None
+    if os.path.exists(script_path):
+        with open(script_path, "r") as f:
+            script = json.load(f)
+    
+    return {
+        "job_id": job_id,
+        "status": job_data.get("status"),
+        "progress": job_data.get("progress"),
+        "message": job_data.get("message"),
+        "video_url": job_data.get("video_url"),
+        "error": job_data.get("error"),
+        "request": job_data.get("request"),
+        "script": script,
+        "created_at": job_data.get("created_at")
     }
 
 
